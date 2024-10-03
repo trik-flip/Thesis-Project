@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+    <include file="$(find peg_in_hole)/launch/bringup_turtlesim.launch">
+        <arg name="id" value="1" />
+        <arg name="pose" value="1" />
+        <arg name="vel" value="2" />
+    </include>
+    <include file="$(find peg_in_hole)/launch/bringup_turtlesim.launch">
+        <arg name="id" value="2" />
+        <arg name="pose" value="2" />
+        <arg name="vel" value="1" />
+    </include>
+    <include file="$(find peg_in_hole)/launch/bringup_turtlesim.launch">
+        <arg name="id" value="3" />
+        <arg name="pose" value="1" />
+        <arg name="vel" value="1" />
+    </include>
+    <node name="dricing_node" pkg="turtlesim" type="turtle_teleop_key" output="screen" />
+</launch>

@@ -1,0 +1,2 @@
+class Facet:
+    pass

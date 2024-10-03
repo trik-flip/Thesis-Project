@@ -1,0 +1,10 @@
+build/
+devel/
+.vscode/
+**/__pycache__/
+**/tmp/
+*.mjb
+*.log
+.*
+!.gitignore
+MUJOCO_LOG.TXT

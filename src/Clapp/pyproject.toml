@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clapp"
+version = "0.0.1"
+description = "My awesome Command Line App"
+readme = "README.md"
+authors = [{ name = "Philip Bollen", email = "flip.philip@hotmail.com" }]
+
+[project.scripts]
+clapp = "clapp.__main__:main"
