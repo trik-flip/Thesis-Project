@@ -1,4 +1,3 @@
-# %% define abstract InverseKinematics class
 import logging
 from abc import ABCMeta, abstractmethod
 from typing import Optional
@@ -11,10 +10,17 @@ from sim.inverse_kinematics.decoupled_position_and_orientation import (
     create_inverse_kinematics_function,
 )
 
-a1 = 0.42  # Length of first link
-a2 = 0.4  # Length of second link
-d6 = 0.181  # Distance from wrist to end-effector
-_ikf = create_inverse_kinematics_function(a1, a2, d6)
+# Length of first link
+first_link_length = 0.42
+# Length of second link
+second_link_length = 0.4
+# Distance from wrist to end-effector
+wrist_to_ee_distance = 0.181
+_ikf = create_inverse_kinematics_function(
+    first_link_length,
+    second_link_length,
+    wrist_to_ee_distance,
+)
 
 
 class InverseKinematics(metaclass=ABCMeta):
@@ -51,7 +57,9 @@ class InverseKinematics(metaclass=ABCMeta):
         self,
         goal,
         goal2: Optional[
-            "tuple[float,float,float,float] | tuple[float,float,float] | tuple[tuple[float,float,float], tuple[float,float,float], tuple[float,float,float]]"
+            "tuple[float,float,float,float] |\
+            tuple[float,float,float] |\
+            tuple[tuple[float,float,float], tuple[float,float,float], tuple[float,float,float]]"
         ] = None,
         type: str = "euler",
     ):
@@ -105,7 +113,7 @@ class InverseKinematics(metaclass=ABCMeta):
         jacr: "Optional[np.ndarray[float, np.dtype[np.float64]]]" = None,
         frame_rate: int = 60,
         init_q: Optional[np.ndarray] = None,
-        renderer: mujoco.renderer.Renderer = None,
+        renderer: mujoco.renderer.Renderer = None,  # type: ignore
         log_level: int = logging.WARNING,
     ):
         self.logger.setLevel(log_level)
@@ -122,7 +130,7 @@ class InverseKinematics(metaclass=ABCMeta):
         # rotational jacobian
         self.jacr = jacr or np.zeros((3, model.nv))
         self.frame_rate = frame_rate
-        self.renderer = renderer or mujoco.renderer.Renderer(
+        self.renderer = renderer or mujoco.renderer.Renderer(  # type: ignore
             model, 1080 // 3, 1920 // 3
         )
 
@@ -149,13 +157,13 @@ class InverseKinematics(metaclass=ABCMeta):
     def _pos_error(
         self, goal: "tuple[float, float, float]"
     ) -> "tuple[float, float, float]":
-        return np.subtract(goal, self.body.xpos)
+        return np.subtract(goal, self.body.xpos)  # type: ignore
 
     def _rot_error(self, goal: R) -> "tuple[float, float, float]":
         self.logger.debug(50 * "-")
         self.logger.debug(goal.as_rotvec())
         self.logger.debug(50 * "=")
-        return (R.from_quat(self.body.xquat).inv() * goal).as_rotvec()
+        return (R.from_quat(self.body.xquat).inv() * goal).as_rotvec()  # type: ignore
 
     def calc_error(
         self, goal_pos: "tuple[float, float, float]", goal_rot: Optional[R] = None
@@ -170,7 +178,7 @@ class InverseKinematics(metaclass=ABCMeta):
 
         self._pos_error_log.append(pos_error)
         self._rot_error_log.append(rot_error)
-        return np.concatenate([pos_error, rot_error])
+        return np.concatenate([pos_error, rot_error])  # type: ignore
 
     def _setup(self, init_q) -> None:
         if init_q is not None:
@@ -196,6 +204,78 @@ class InverseKinematics(metaclass=ABCMeta):
         into.append([(x, y) for x, y in zip(self._force_log, self._torque_log)])
         return self
 
+    def solve3(
+        self,
+        goal: "np.ndarray | tuple[float,float,float] | list[float]",
+        goalr: "tuple[float,float,float] | list[float] | None" = None,
+        init_q: "Optional[list[mujoco.mjtNum]]" = None,
+        max_iterations: int = 2000,
+    ) -> "InverseKinematics":
+        self._pos_error_log = []
+        self._rot_error_log = []
+        self._force_log = []
+        self._torque_log = []
+        self._setup(init_q)
+        self._set_goal(goal, goalr)  # type: ignore
+
+        if goalr is None:
+            goalr = [0, 0, 0]  # type: ignore
+
+        goalr = R.from_euler("xyz", goalr)  # type: ignore
+        assert isinstance(goalr, R)
+
+        self.show_image()
+
+        old = self.data.qpos.copy()
+        mujoco.mj_step(self.model, self.data)
+        ee_pos = (goal - np.array([0, 0, 0.315]))[::-1]
+        joint_angles = _ikf(ee_pos, goalr.as_matrix())
+
+        self.set_ctrl(joint_angles)
+        self.check_ctrl_limits()
+
+        counter = 0
+        while (
+            np.linalg.norm(self.data.qpos - old) > 1e-8
+            and counter < max_iterations
+            and self.data.ncon == 0
+        ):
+            self.logger.info(f"[{counter}/{max_iterations}]")
+            counter += 1
+            err = self._pos_error(goal)  # type: ignore
+            self._pos_error_log.append(err)
+            self._rot_error_log.append((0.0, 0.0, 0.0))
+            old = self.data.qpos.copy()
+            mujoco.mj_step(self.model, self.data)
+            self._record_frame()
+        # * If `self.data.ncon` then we've hit something and we'll go on with a search
+        # * Else we're done and don't have to do anything any more
+        # * Thus we inverse the result and stop if we didn't hit anything
+        if self.data.ncon == 0:
+            return self
+        self.start_search()
+        return self
+
+    def set_ctrl(self, joint_angles: "list[float]") -> None:
+        self.data.ctrl[0] = joint_angles[0]
+        self.data.ctrl[1] = joint_angles[1]
+        self.data.ctrl[2] = 0
+        self.data.ctrl[3] = -joint_angles[2]
+        self.data.ctrl[4] = joint_angles[3]
+        self.data.ctrl[5] = joint_angles[4]
+        self.data.ctrl[6] = joint_angles[5]
+
+    def start_search(self) -> None:
+        force_torque_array = np.zeros(6, dtype=np.float64)
+        for i in range(self.data.ncon):
+            mujoco.mj_contactForce(self.model, self.data, i, force_torque_array)
+            print(self.data.contact)
+            raise Exception("# TODO: Implement!")
+
+    # NOTE: might be usefull -> https://mujoco.readthedocs.io/en/stable/APIreference/APIfunctions.html#mju-encodepyramid
+    # * `self.data.contact` should contain all contacts, might have some nice properties
+    # * Look also at https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html#mjcontact
+
     def solve2(
         self,
         goal: "np.ndarray | tuple[float,float,float] | list[float]",
@@ -216,19 +296,15 @@ class InverseKinematics(metaclass=ABCMeta):
         assert isinstance(goalr, R)
 
         self.show_image()
+
         old = self.data.qpos.copy()
         mujoco.mj_step(self.model, self.data)
         p_e = (goal - np.array([0, 0, 0.315]))[::-1]
         joint_angles = _ikf(p_e, goalr.as_matrix())
 
-        self.data.ctrl[0] = joint_angles[0]
-        self.data.ctrl[1] = joint_angles[1]
-        self.data.ctrl[2] = 0
-        self.data.ctrl[3] = -joint_angles[2]
-        self.data.ctrl[4] = joint_angles[3]
-        self.data.ctrl[5] = joint_angles[4]
-        self.data.ctrl[6] = joint_angles[5]
+        self.set_ctrl(joint_angles)
         self.check_ctrl_limits()
+
         counter = 0
         while np.linalg.norm(self.data.qpos - old) > 1e-8 and counter < max_iterations:
             self.logger.info(f"[{counter}/{max_iterations}]")
@@ -239,27 +315,9 @@ class InverseKinematics(metaclass=ABCMeta):
             old = self.data.qpos.copy()
             mujoco.mj_step(self.model, self.data)
             self._record_frame()
-            self._handle_contact_formations()
+            self._collision_handling()
 
         return self
-
-    def _handle_contact_formations(self) -> None:
-        """Check for contact formations"""
-        if self.data.ncon:
-            self.logger.info(f"Making {self.data.ncon} contacts")
-            for i in range(self.data.ncon):
-                force_torque_array = np.zeros(6, dtype=np.float64)
-                mujoco.mj_contactForce(self.model, self.data, i, force_torque_array)
-                forces = force_torque_array[:3]
-                torques = force_torque_array[3:]
-                self.logger.debug(
-                    f"Direction of force: [{forces[0]:.2f} | {forces[1]:.2f} | {forces[2]:.2f}]"
-                )
-                self._force_log.append(forces)
-                self.logger.debug(
-                    f"Direction of torque: [{torques[0]:.2f} | {torques[1]:.2f} | {torques[2]:.2f}]"
-                )
-                self._torque_log.append(torques)
 
     def solve(
         self,
@@ -304,14 +362,20 @@ class InverseKinematics(metaclass=ABCMeta):
         return self
 
     def _collision_handling(self) -> None:
-        if not self.data.ncon:
+        if self.data.ncon == 0:
             return
 
+        self.logger.info(f"Making {self.data.ncon} contacts")
         force_torque_array = np.zeros(6, dtype=np.float64)
+
         for i in range(self.data.ncon):
             mujoco.mj_contactForce(self.model, self.data, i, force_torque_array)
             forces = force_torque_array[:3]
             torques = force_torque_array[3:]
+
+            self._force_log.append(forces)
+            self._torque_log.append(torques)
+
             self.logger.debug(f"Forces: {forces}")
             self.logger.debug(f"Total force: {np.linalg.norm(forces)}")
             self.logger.debug(f"Direction of force: {forces / np.linalg.norm(forces)}")
