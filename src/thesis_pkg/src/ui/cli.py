@@ -4,12 +4,12 @@ from argparse import ArgumentParser
 from inspect import _empty, signature
 from typing import Optional, cast
 
-from insertion.contact_formations import insert
+from contact_formations import insert
 from sim import get_flags, simulators
 from sim.inverse_kinematics import get_IK
 from ui import CLI_LEAF, CLI_TREE, EXPLAINATION
 
-sys.path.append("/home/philip/catkin_ws/src/thesis_pkg/src")
+sys.path.append("/home/philip/catkin_wsLink/src/thesis_pkg/src")
 
 
 structure = {

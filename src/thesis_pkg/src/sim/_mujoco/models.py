@@ -6,35 +6,36 @@ from dm_control import mjcf
 from mujoco import MjModel
 from pipe import Pipe
 
-path = "/home/philip/Code/OtherProjects/mujoco_menagerie/kuka_iiwa_14/scene.xml"
+from utils.constants import path_kuka_iiwa_14_model
+
+path = f"{path_kuka_iiwa_14_model}/scene.xml"
 
 
-def gen_target(pos=[0.5, 0, 0.6], rot=[0, 1, 0, 0], mocap=True):
-
+def gen_target(pos=[0.5, 0, 0.6], rot=[0, 1, 0, 0], mocap=True) -> mjcf.RootElement:
     target = mjcf.RootElement()
-    b = target.worldbody.add("body", name="target", pos=pos, quat=rot, mocap=mocap)
+    _ = target.worldbody.add("body", name="target", pos=pos, quat=rot, mocap=mocap)
     return target
 
 
-def get_mujoco_model(xml_model):
+def get_mujoco_model(xml_model) -> MjModel:
     export_model(xml_model)
     model = MjModel.from_xml_path("tmp/tmp.xml")
     clean_temp_files()
     return model
 
 
-def clean_temp_files():
+def clean_temp_files() -> None:
     glob.glob("tmp/*") | remove_files
     if os.path.exists("tmp/"):
         os.removedirs("tmp/")
 
 
-def export_model(model):
+def export_model(model) -> None:
     mjcf.export_with_assets(model, "tmp", "tmp.xml")
 
 
 @Pipe
-def remove_files(files) -> None:
+def remove_files(files: "list[str]") -> None:
     for file in files:
         os.remove(file)
 

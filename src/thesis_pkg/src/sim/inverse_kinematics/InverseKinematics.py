@@ -1,5 +1,6 @@
 import logging
 from abc import ABCMeta, abstractmethod
+from functools import singledispatch
 from typing import Optional
 
 import mediapy as media
@@ -26,38 +27,74 @@ _ikf = create_inverse_kinematics_function(
 class InverseKinematics(metaclass=ABCMeta):
     """Any implementation should implement the `_step` method"""
 
+    # region: Utils
     logger = logging.getLogger("InverseKinematicsLogger")
+    # endregion
+    # region: Force control
+    __force_log: "list[tuple[float, float, float]]" = []
+    __torque_log: "list[tuple[float, float, float]]" = []
 
-    def __call__(
-        self,
-        goal: "tuple[float,float,float] | list[float]",
-        goalr: "tuple[float,float,float] | list[float] | None" = None,
-        init_q: "Optional[list[mujoco.mjtNum]]" = None,
-    ) -> "InverseKinematics":
-        """This is just an convenience wrapper around `solve`"""
-        return self.solve(goal, goalr, init_q)
+    def copy_torque_log(self, into: "list[None|list]") -> "InverseKinematics":
+        into.append([(x, y) for x, y in zip(self.__force_log, self.__torque_log)])
+        return self
 
-    def check_ctrl_limits(self) -> None:
-        """Check if the joints is under or above its limits"""
-        for i in range(len(self.data.qpos)):
-            self.data.ctrl[i] = max(
-                self.model.jnt_range[i][0],  # type: ignore
-                min(self.data.ctrl[i], self.model.jnt_range[i][1]),  # type: ignore
-            )
+    # endregion
+    # region: Error (as in the distance between current and goal pose)
+    __pos_error_log: (
+        "list[tuple[float, float, float] | np.ndarray[float,np.dtype[np.float64]]]"
+    )
+    __rot_error_log: (
+        "list[tuple[float, float, float] | np.ndarray[float,np.dtype[np.float64]]]"
+    )
 
-    def check_joint_limits(self) -> None:
-        """Check if the joints is under or above its limits"""
-        for i in range(len(self.data.qpos)):
-            self.data.qpos[i] = max(
-                self.model.jnt_range[i][0],  # type: ignore
-                min(self.data.qpos[i], self.model.jnt_range[i][1]),  # type: ignore
-            )
+    def copy_error_log(self, into: "list[None|list]") -> "InverseKinematics":
+        into.append(
+            [(x, y) for x, y in zip(self.__pos_error_log, self.__rot_error_log)]
+        )
+        return self
 
-    def _set_goal(
+    def __calc_pos_error(
+        self, goal: "list[float] | tuple[float, float, float]"
+    ) -> "np.ndarray[float, np.dtype[np.float64]]":
+        return np.subtract(goal, self.body.xpos)
+
+    def __calc_rot_error(self, goal: R) -> "np.ndarray[float, np.dtype[np.float64]]":
+        self.logger.debug(50 * "-")
+        self.logger.debug(goal.as_rotvec())
+        self.logger.debug(50 * "=")
+        return (R.from_quat(self.body.xquat).inv() * goal).as_rotvec()
+
+    def __calc_error(
+        self, goal_pos: "tuple[float, float, float]", goal_rot: Optional[R] = None
+    ) -> "np.ndarray[float,np.dtype[np.float64]] |\
+        tuple[float, float, float] |\
+              tuple[float, float, float, float, float, float]":
+        """Calculate the error from the appointed joint to the target location
+        Args:
+            goal_pos (tuple[float, float, float]): the position of the goal
+            goal_rot (Optional[R], optional): the oririentation (or rotation) of the goal. Defaults to None.
+        Returns:
+            tuple[float, float, float] | tuple[float, float, float, float, float, float]: The error, if the goal_rot is `None`, then we'll return list[float,float,float] otherwise a list[float,float,float,float,float,float]
+        """
+        if goal_rot is None:
+            pos_error = self.__calc_pos_error(goal_pos)
+            self.__pos_error_log.append(pos_error)
+            self.__rot_error_log.append((0.0, 0.0, 0.0))
+            return pos_error
+        pos_error = self.__calc_pos_error(goal_pos)
+        rot_error = self.__calc_rot_error(goal_rot)
+        self.__pos_error_log.append(pos_error)
+        self.__rot_error_log.append(rot_error)
+        return np.concatenate([pos_error, rot_error])
+
+    # endregion
+    # region: Goal control
+    def __visual_set_goal(
         self,
         goal,
         goal2: Optional[
-            "tuple[float,float,float,float] |\
+            "list[float] |\
+            tuple[float,float,float,float] |\
             tuple[float,float,float] |\
             tuple[tuple[float,float,float], tuple[float,float,float], tuple[float,float,float]]"
         ] = None,
@@ -68,24 +105,36 @@ class InverseKinematics(metaclass=ABCMeta):
         self.data.mocap_pos[0] = goal[:]
         if goal2 is not None:
             if type == "euler":
-                self.data.mocap_quat[0] = R.from_euler("xyz", goal2).as_quat()  # type: ignore
+                self.data.mocap_quat[0] = R.from_euler("xyz", goal2).as_quat()
             elif type == "quat":
-                self.data.mocap_quat[0] = goal2[:]  # type: ignore
+                self.data.mocap_quat[0] = goal2[:]
             elif type == "mat":
-                self.data.mocap_quat[0] = R.from_matrix(goal2).as_quat()  # type: ignore
+                self.data.mocap_quat[0] = R.from_matrix(goal2).as_quat()
 
+    # endregion
+    # region: Command control
+    def __check_ctrl_limits(self) -> None:
+        """Check if the joints is under or above its limits"""
+        for i in range(len(self.data.qpos)):
+            self.data.ctrl[i] = max(
+                self.model.jnt_range[i][0],
+                min(self.data.ctrl[i], self.model.jnt_range[i][1]),
+            )
+
+    def __check_joint_limits(self) -> None:
+        """Check if the joints is under or above its limits"""
+        for i in range(len(self.data.qpos)):
+            self.data.qpos[i] = max(
+                self.model.jnt_range[i][0],
+                min(self.data.qpos[i], self.model.jnt_range[i][1]),
+            )
+
+    # endregion
+    # region: Quality Of Life / Utility
     @property
     def c(self) -> "InverseKinematics":
         """Return a copy of the model"""
         return self.__copy__()
-
-    def __copy__(self):
-        cls = self.__class__
-        model = cls.__new__(cls)
-        model.__dict__.update(self.__dict__)
-        model.data = self.data.__copy__()
-        model.frames = self.frames.copy()
-        return model
 
     def copies(self, n: int = 1) -> "list[InverseKinematics]":
         copies = []
@@ -101,6 +150,25 @@ class InverseKinematics(metaclass=ABCMeta):
     def jac(self):
         return np.vstack([self.jacp, self.jacr])
 
+    # endregion
+    # region: Class internals
+    def __call__(
+        self,
+        goal: "tuple[float,float,float] | list[float]",
+        goalr: "tuple[float,float,float] | list[float] | None" = None,
+        init_q: "Optional[list[mujoco.mjtNum]]" = None,
+    ) -> "InverseKinematics":
+        """This is just an convenience wrapper around `solve`"""
+        return self.solve(goal, goalr, init_q)
+
+    def __copy__(self):
+        cls = self.__class__
+        model = cls.__new__(cls)
+        model.__dict__.update(self.__dict__)
+        model.data = self.data.__copy__()
+        model.frames = self.frames.copy()
+        return model
+
     def __init__(
         self,
         model: mujoco.MjModel,
@@ -113,7 +181,7 @@ class InverseKinematics(metaclass=ABCMeta):
         jacr: "Optional[np.ndarray[float, np.dtype[np.float64]]]" = None,
         frame_rate: int = 60,
         init_q: Optional[np.ndarray] = None,
-        renderer: mujoco.renderer.Renderer = None,  # type: ignore
+        renderer: mujoco.renderer.Renderer = None,
         log_level: int = logging.WARNING,
     ):
         self.logger.setLevel(log_level)
@@ -130,240 +198,28 @@ class InverseKinematics(metaclass=ABCMeta):
         # rotational jacobian
         self.jacr = jacr or np.zeros((3, model.nv))
         self.frame_rate = frame_rate
-        self.renderer = renderer or mujoco.renderer.Renderer(  # type: ignore
-            model, 1080 // 3, 1920 // 3
-        )
+        self.renderer = renderer or mujoco.renderer.Renderer(model, 1080, 1920)
 
         self.body_id = body_id or model.body("link7").id
         assert isinstance(self.body_id, int)
         self.scene_option = mujoco.MjvOption()
-        self.scene_option.frame = mujoco.mjtFrame.mjFRAME_SITE  # type: ignore
+        self.scene_option.frame = mujoco.mjtFrame.mjFRAME_SITE
         # Make all sitegroup visiable
         self.scene_option.sitegroup[4] = 1
 
         self.frames = []
-        self.acc = self.data.actuator_force.__copy__()  # type: ignore
+        self.acc = self.data.actuator_force.__copy__()
         self.camera = mujoco.MjvCamera()
         mujoco.mjv_defaultFreeCamera(model, self.camera)
         self.camera.distance = 3
 
-    def _get_correct_jac(self, error):
-        if error.shape[0] == 3:
-            jac = self.jacp
-        else:
-            jac = self.jac
-        return jac
+    # endregion
+    # region: Collision
 
-    def _pos_error(
-        self, goal: "tuple[float, float, float]"
-    ) -> "tuple[float, float, float]":
-        return np.subtract(goal, self.body.xpos)  # type: ignore
-
-    def _rot_error(self, goal: R) -> "tuple[float, float, float]":
-        self.logger.debug(50 * "-")
-        self.logger.debug(goal.as_rotvec())
-        self.logger.debug(50 * "=")
-        return (R.from_quat(self.body.xquat).inv() * goal).as_rotvec()  # type: ignore
-
-    def calc_error(
-        self, goal_pos: "tuple[float, float, float]", goal_rot: Optional[R] = None
-    ) -> "tuple[float, float, float] | tuple[float, float, float, float, float, float]":
-        if goal_rot is None:
-            pos_error = self._pos_error(goal_pos)
-            self._pos_error_log.append(pos_error)
-            self._rot_error_log.append((0.0, 0.0, 0.0))
-            return pos_error
-        pos_error = self._pos_error(goal_pos)
-        rot_error = self._rot_error(goal_rot)
-
-        self._pos_error_log.append(pos_error)
-        self._rot_error_log.append(rot_error)
-        return np.concatenate([pos_error, rot_error])  # type: ignore
-
-    def _setup(self, init_q) -> None:
-        if init_q is not None:
-            self.data.qpos = init_q
-        mujoco.mj_forward(self.model, self.data)
-
-    def _record_frame(self) -> None:
-        if (
-            self.frame_rate is not None
-            and len(self.frames) < self.data.time * self.frame_rate
-        ):
-            self.renderer.update_scene(
-                self.data, self.camera, scene_option=self.scene_option
-            )
-            pixels = self.renderer.render()
-            self.frames.append(pixels)
-
-    def copy_error_log(self, into: "list[None|list]") -> "InverseKinematics":
-        into.append([(x, y) for x, y in zip(self._pos_error_log, self._rot_error_log)])
-        return self
-
-    def copy_torque_log(self, into: "list[None|list]") -> "InverseKinematics":
-        into.append([(x, y) for x, y in zip(self._force_log, self._torque_log)])
-        return self
-
-    def solve3(
-        self,
-        goal: "np.ndarray | tuple[float,float,float] | list[float]",
-        goalr: "tuple[float,float,float] | list[float] | None" = None,
-        init_q: "Optional[list[mujoco.mjtNum]]" = None,
-        max_iterations: int = 2000,
-    ) -> "InverseKinematics":
-        self._pos_error_log = []
-        self._rot_error_log = []
-        self._force_log = []
-        self._torque_log = []
-        self._setup(init_q)
-        self._set_goal(goal, goalr)  # type: ignore
-
-        if goalr is None:
-            goalr = [0, 0, 0]  # type: ignore
-
-        goalr = R.from_euler("xyz", goalr)  # type: ignore
-        assert isinstance(goalr, R)
-
-        self.show_image()
-
-        old = self.data.qpos.copy()
-        mujoco.mj_step(self.model, self.data)
-        ee_pos = (goal - np.array([0, 0, 0.315]))[::-1]
-        joint_angles = _ikf(ee_pos, goalr.as_matrix())
-
-        self.set_ctrl(joint_angles)
-        self.check_ctrl_limits()
-
-        counter = 0
-        while (
-            np.linalg.norm(self.data.qpos - old) > 1e-8
-            and counter < max_iterations
-            and self.data.ncon == 0
-        ):
-            self.logger.info(f"[{counter}/{max_iterations}]")
-            counter += 1
-            err = self._pos_error(goal)  # type: ignore
-            self._pos_error_log.append(err)
-            self._rot_error_log.append((0.0, 0.0, 0.0))
-            old = self.data.qpos.copy()
-            mujoco.mj_step(self.model, self.data)
-            self._record_frame()
-        # * If `self.data.ncon` then we've hit something and we'll go on with a search
-        # * Else we're done and don't have to do anything any more
-        # * Thus we inverse the result and stop if we didn't hit anything
+    def __collision_handling(self) -> bool:
+        """During collision we'll log the forces applied on the contact points"""
         if self.data.ncon == 0:
-            return self
-        self.start_search()
-        return self
-
-    def set_ctrl(self, joint_angles: "list[float]") -> None:
-        self.data.ctrl[0] = joint_angles[0]
-        self.data.ctrl[1] = joint_angles[1]
-        self.data.ctrl[2] = 0
-        self.data.ctrl[3] = -joint_angles[2]
-        self.data.ctrl[4] = joint_angles[3]
-        self.data.ctrl[5] = joint_angles[4]
-        self.data.ctrl[6] = joint_angles[5]
-
-    def start_search(self) -> None:
-        force_torque_array = np.zeros(6, dtype=np.float64)
-        for i in range(self.data.ncon):
-            mujoco.mj_contactForce(self.model, self.data, i, force_torque_array)
-            print(self.data.contact)
-            raise Exception("# TODO: Implement!")
-
-    # NOTE: might be usefull -> https://mujoco.readthedocs.io/en/stable/APIreference/APIfunctions.html#mju-encodepyramid
-    # * `self.data.contact` should contain all contacts, might have some nice properties
-    # * Look also at https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html#mjcontact
-
-    def solve2(
-        self,
-        goal: "np.ndarray | tuple[float,float,float] | list[float]",
-        goalr: "tuple[float,float,float] | list[float] | None" = None,
-        init_q: "Optional[list[mujoco.mjtNum]]" = None,
-        max_iterations: int = 2000,
-    ) -> "InverseKinematics":
-        self._pos_error_log = []
-        self._rot_error_log = []
-        self._force_log = []
-        self._torque_log = []
-        self._setup(init_q)
-        self._set_goal(goal, goalr)
-
-        if goalr is None:
-            goalr = [0, 0, 0]  # type: ignore
-        goalr = R.from_euler("xyz", goalr)  # type: ignore
-        assert isinstance(goalr, R)
-
-        self.show_image()
-
-        old = self.data.qpos.copy()
-        mujoco.mj_step(self.model, self.data)
-        p_e = (goal - np.array([0, 0, 0.315]))[::-1]
-        joint_angles = _ikf(p_e, goalr.as_matrix())
-
-        self.set_ctrl(joint_angles)
-        self.check_ctrl_limits()
-
-        counter = 0
-        while np.linalg.norm(self.data.qpos - old) > 1e-8 and counter < max_iterations:
-            self.logger.info(f"[{counter}/{max_iterations}]")
-            counter += 1
-            err = self._pos_error(goal)
-            self._pos_error_log.append(err)
-            self._rot_error_log.append((0.0, 0.0, 0.0))
-            old = self.data.qpos.copy()
-            mujoco.mj_step(self.model, self.data)
-            self._record_frame()
-            self._collision_handling()
-
-        return self
-
-    def solve(
-        self,
-        goal: "tuple[float,float,float] | list[float]",
-        goalr: "tuple[float,float,float] | list[float] | None" = None,
-        init_q: "Optional[list[mujoco.mjtNum]]" = None,
-    ) -> "InverseKinematics":
-        self._pos_error_log = []
-        self._rot_error_log = []
-        self._setup(init_q)
-        self._set_goal(goal, goalr)
-
-        if goalr is not None:
-            goalr = R.from_euler("xyz", goalr)  # type: ignore
-            assert isinstance(goalr, R)
-        error = self.calc_error(goal, goalr)
-        iteration_counter = 0
-        self.show_image()
-        while np.linalg.norm(error) >= self.tol * 5 and iteration_counter < 2000:
-            self.logger.debug(f"Rotation: {R.from_quat(self.body.xquat).as_rotvec()}")
-            self._collision_handling()
-
-            mujoco.mj_jac(
-                self.model, self.data, self.jacp, self.jacr, goal, self.body_id  # type: ignore
-            )
-
-            q = self.data.qpos.copy()
-
-            q += self._step(error) * self.step_size
-            self.check_joint_limits()
-            self.data.ctrl = q
-
-            # compute forward kinematics
-            mujoco.mj_step(self.model, self.data)
-
-            error = self.calc_error(goal, goalr)
-            self._record_frame()
-
-            iteration_counter += 1
-        if iteration_counter >= 400:
-            self.logger.warning("hit max iterations")
-        return self
-
-    def _collision_handling(self) -> None:
-        if self.data.ncon == 0:
-            return
+            return False
 
         self.logger.info(f"Making {self.data.ncon} contacts")
         force_torque_array = np.zeros(6, dtype=np.float64)
@@ -373,8 +229,8 @@ class InverseKinematics(metaclass=ABCMeta):
             forces = force_torque_array[:3]
             torques = force_torque_array[3:]
 
-            self._force_log.append(forces)
-            self._torque_log.append(torques)
+            self.__force_log.append(forces)
+            self.__torque_log.append(torques)
 
             self.logger.debug(f"Forces: {forces}")
             self.logger.debug(f"Total force: {np.linalg.norm(forces)}")
@@ -385,6 +241,205 @@ class InverseKinematics(metaclass=ABCMeta):
             self.logger.debug(
                 f"Direction of torque: {torques / np.linalg.norm(torques)}"
             )
+        return True
+
+    # endregion
+    # region: ### Our methods ###
+    def __start_search(self, goal, goalr=None) -> None:
+        force_torque_array = np.zeros(6, dtype=np.float64)
+        for i in range(self.data.ncon):
+            mujoco.mj_contactForce(self.model, self.data, i, force_torque_array)
+            print(self.data.contact)
+            print(force_torque_array[:3])
+        raise Exception("# TODO: Implement!")
+        # NOTE: might be usefull -> https://mujoco.readthedocs.io/en/stable/APIreference/APIfunctions.html#mju-encodepyramid
+        # * `self.data.contact` should contain all contacts, might have some nice properties
+        # * Look also at https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html#mjcontact
+
+    # endregion
+    # region: Helpers
+    def _get_correct_jac(
+        self, error: np.ndarray
+    ) -> "np.ndarray[float, np.dtype[np.float64]]":
+        if error.shape[0] == 3:
+            jac = self.jacp
+        else:
+            jac = self.jac
+        return jac
+
+    def __setup(self, init_q) -> None:
+        if init_q is not None:
+            self.data.qpos = init_q
+        mujoco.mj_forward(self.model, self.data)
+
+    def __set_ctrl(self, joint_angles: "list[float]") -> None:
+        self.data.ctrl[0] = joint_angles[0]
+        self.data.ctrl[1] = joint_angles[1]
+        self.data.ctrl[2] = 0
+        self.data.ctrl[3] = -joint_angles[2]
+        self.data.ctrl[4] = joint_angles[3]
+        self.data.ctrl[5] = joint_angles[4]
+        self.data.ctrl[6] = joint_angles[5]
+
+    # endregion
+    # region: Public methods
+    def solve3(
+        self,
+        goal: "np.ndarray | tuple[float,float,float] | list[float]",
+        goalr: "tuple[float,float,float] | list[float] | None" = None,
+        init_q: "Optional[list[mujoco.mjtNum]]" = None,
+        max_iterations: int = 2000,
+    ) -> "InverseKinematics":
+        self.__pos_error_log = []
+        self.__rot_error_log = []
+        self.__force_log = []
+        self.__torque_log = []
+        self.__setup(init_q)
+        self.__visual_set_goal(goal, goalr)
+
+        if goalr is None:
+            goalr = [0, 0, 0]
+
+        goalr = R.from_euler("xyz", goalr)
+        assert isinstance(goalr, R)
+
+        self.show_image()
+
+        old = self.data.qpos.copy()
+        mujoco.mj_step(self.model, self.data)
+        ee_pos = (goal - np.array([0, 0, 0.315]))[::-1]
+        joint_angles = _ikf(ee_pos, goalr.as_matrix())
+
+        self.__set_ctrl(joint_angles)
+        self.__check_ctrl_limits()
+
+        counter = 0
+        while (
+            np.linalg.norm(self.data.qpos - old) > 1e-8
+            and counter < max_iterations
+            and self.data.ncon == 0
+        ):
+            self.logger.info(f"[{counter}/{max_iterations}]")
+            counter += 1
+            err = self.__calc_pos_error(goal)
+            self.__pos_error_log.append(err)
+            self.__rot_error_log.append((0.0, 0.0, 0.0))
+            old = self.data.qpos.copy()
+            mujoco.mj_step(self.model, self.data)
+            self.__vis_record_frame()
+
+        # * If `self.data.ncon` then we've hit something and we'll go on with a search
+        # * Else we're done and don't have to do anything any more
+        # * Thus we inverse the result and stop if we didn't hit anything
+        if self.data.ncon == 0:
+            return self
+
+        force_torque_array = np.zeros((self.data.ncon, 6), dtype=np.float64)
+        for i in range(self.data.ncon):
+            mujoco.mj_contactForce(self.model, self.data, i, force_torque_array[i])
+            print(self.data.contact)
+            print(force_torque_array[:3])
+
+        average_pos = np.average(self.data.contact.pos, axis=0)
+        average_force = np.average(force_torque_array[:, :3], axis=0)
+
+        a, b, c = average_force
+        x0, y0, z0 = average_pos
+
+        # plane = lambda x,y,z : a(x-x0)+ b(y-y0) + c(z-z0) = 0
+
+        raise Exception("# TODO: Implement!")
+        # NOTE: might be usefull -> https://mujoco.readthedocs.io/en/stable/APIreference/APIfunctions.html#mju-encodepyramid
+        # * `self.data.contact` should contain all contacts, might have some nice properties
+        # * Look also at https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html#mjcontact
+
+        return self
+
+    def solve2(
+        self,
+        goal: "np.ndarray | tuple[float,float,float] | list[float]",
+        goalr: "tuple[float,float,float] | list[float] | None" = None,
+        init_q: "Optional[list[mujoco.mjtNum]]" = None,
+        max_iterations: int = 2000,
+        file_name: Optional[str] = None,
+    ) -> "InverseKinematics":
+        self.__pos_error_log = []
+        self.__rot_error_log = []
+        self.__force_log = []
+        self.__torque_log = []
+        self.__setup(init_q)
+        self.__visual_set_goal(goal, goalr)
+        if goalr is None:
+            goalr = [0, 0, 0]
+        goal_r = R.from_euler("xyz", goalr)
+        assert isinstance(goal_r, R)
+        old = self.data.qpos.copy()
+        mujoco.mj_step(self.model, self.data)
+        p_e = (goal - np.array([0, 0, 0.315]))[::-1]
+        joint_angles = _ikf(p_e, goal_r.as_matrix())
+        self.__set_ctrl(joint_angles)
+        self.__check_ctrl_limits()
+        counter = 0
+        self.show_image(file_name)
+        while np.linalg.norm(self.data.qpos - old) > 1e-8 and counter < max_iterations:
+            self.logger.info(f"[{counter}/{max_iterations}]")
+            counter += 1
+            err = self.__calc_pos_error(goal)
+            self.__pos_error_log.append(err)
+            self.__rot_error_log.append((0.0, 0.0, 0.0))
+            old = self.data.qpos.copy()
+            mujoco.mj_step(self.model, self.data)
+            self.__vis_record_frame()
+            self.__collision_handling()
+        return self
+
+    def solve(
+        self,
+        goal: "tuple[float,float,float] | list[float]",
+        goalr: "tuple[float,float,float] | list[float] | None" = None,
+        init_q: "Optional[list[mujoco.mjtNum]]" = None,
+    ) -> "InverseKinematics":
+        self.__pos_error_log = []
+        self.__rot_error_log = []
+        self.__setup(init_q)
+        self.__visual_set_goal(goal, goalr)
+        if goalr is not None:
+            goalr = R.from_euler("xyz", goalr)
+            assert isinstance(goalr, R)
+        error = self.__calc_error(goal, goalr)
+        iteration_counter = 0
+        self.show_image()
+        while np.linalg.norm(error) >= self.tol * 5 and iteration_counter < 2000:
+            self.logger.debug(f"Rotation: {R.from_quat(self.body.xquat).as_rotvec()}")
+            self.__collision_handling()
+            mujoco.mj_jac(
+                self.model, self.data, self.jacp, self.jacr, goal, self.body_id
+            )
+            q = self.data.qpos.copy()
+            q += self._step(error) * self.step_size
+            self.__check_joint_limits()
+            self.data.ctrl = q
+            # compute forward kinematics
+            mujoco.mj_step(self.model, self.data)
+            error = self.__calc_error(goal, goalr)
+            self.__vis_record_frame()
+            iteration_counter += 1
+        if iteration_counter >= 400:
+            self.logger.warning("hit max iterations")
+        return self
+
+    # endregion
+    # region: Visualization
+    def __vis_record_frame(self) -> None:
+        if (
+            self.frame_rate is not None
+            and len(self.frames) < self.data.time * self.frame_rate
+        ):
+            self.renderer.update_scene(
+                self.data, self.camera, scene_option=self.scene_option
+            )
+            pixels = self.renderer.render()
+            self.frames.append(pixels)
 
     def show_video(self) -> "InverseKinematics":
         assert (
@@ -393,7 +448,7 @@ class InverseKinematics(metaclass=ABCMeta):
         media.show_video(self.frames, fps=self.frame_rate)
         return self
 
-    def show_image(self) -> "InverseKinematics":
+    def show_image(self, file_name: Optional[str] = None) -> "InverseKinematics":
         """Create a simple image of the current state"""
         # update to the latest pose
         mujoco.mj_forward(self.model, self.data)
@@ -404,8 +459,14 @@ class InverseKinematics(metaclass=ABCMeta):
         # render & show scene
         rendered_image = self.renderer.render()
         media.show_image(rendered_image)
+        if file_name is not None:
+            media.write_image(file_name, rendered_image)
         return self
 
+    # endregion
+    # region: Abstract Interfaces
     @abstractmethod
-    def _step(self, error) -> "tuple[float, ...]":
+    def _step(self, error) -> "np.ndarray[float, np.dtype[np.float64]]":
         raise NotImplementedError()
+
+    # endregion

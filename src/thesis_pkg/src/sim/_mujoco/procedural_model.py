@@ -5,7 +5,10 @@ import re
 from glob import glob
 from math import pi
 
+import mujoco.viewer as viewer
 from dm_control import mjcf
+from mujoco import MjModel
+from utils.constants import path_kuka_iiwa_14_model
 
 _logger = logging.getLogger("ProceduralModelLogger")
 _logger.setLevel(logging.DEBUG)
@@ -191,11 +194,9 @@ def update_dyn_emum(kwargs) -> None:
 
 
 def _main(model_name: str = "cyl_8") -> None:
-    import mujoco.viewer as viewer
-    from mujoco import MjModel
 
     home = os.path.expanduser("~")
-    path = f"{home}/Code/OtherProjects/mujoco_menagerie/kuka_iiwa_14/scene2.xml"
+    path = f"{path_kuka_iiwa_14_model}/scene2.xml"
     assert os.path.exists(path), path + " does not exist"
     xml_model = mjcf.from_path(path)
     site = xml_model.find("site", "attachment_site").parent

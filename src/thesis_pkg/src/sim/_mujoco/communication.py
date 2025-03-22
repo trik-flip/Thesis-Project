@@ -20,7 +20,7 @@ def transform_values(x: float, i: int, mode: Modes) -> float:
     return y
 
 
-def translate_positions(pos, mode: Modes) -> "JointPosition":
+def translate_positions(pos, mode: Modes):
     if mode == Modes.S2R:
         res = _S2B_position(pos)
     else:
@@ -28,7 +28,7 @@ def translate_positions(pos, mode: Modes) -> "JointPosition":
     return res
 
 
-def translate_forces(frc: "list[float]", mode: Modes) -> "JointPosition":
+def translate_forces(frc: "list[float]", mode: Modes):
     if mode == Modes.R2S:
         res = _R2S_forces(frc)
     elif mode == Modes.S2R:
@@ -36,12 +36,12 @@ def translate_forces(frc: "list[float]", mode: Modes) -> "JointPosition":
     return res
 
 
-def _S2B_position(pos) -> "JointPosition":
+def _S2B_position(pos):
     res = JointPosition()
     return res
 
 
-def _B2S_position(pos) -> "JointPosition":
+def _B2S_position(pos):
     raise NotImplementedError()
 
 
@@ -95,11 +95,11 @@ def _R2S_transform(x: float, i: int) -> float:
     return y
 
 
-def _S2R_forces(frc: "list[float]") -> "JointPosition":
+def _S2R_forces(frc: "list[float]"):
     raise NotImplementedError()
 
 
-def _R2S_forces(frc: "list[float]") -> "JointPosition":
+def _R2S_forces(frc: "list[float]"):
     jp = JointPosition()
     jp.position.a1 = frc[0]
     jp.position.a2 = frc[1]

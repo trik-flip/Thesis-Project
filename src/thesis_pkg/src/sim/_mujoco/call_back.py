@@ -76,7 +76,7 @@ def _move_left_action(state: STATE_DICT_TYPE) -> None:
     state["acc"][2] -= 1
 
 
-def callback(d: mujoco.MjData, jp: "JointPosition") -> None:
+def callback(d: mujoco.MjData, jp) -> None:
     # Step 1: Retrieve Data
     jp = jp.position
     # Step 2: Pass the sensor data into the simulation

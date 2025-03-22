@@ -2,7 +2,7 @@ import random
 from math import log2 as log
 from typing import Iterable, Literal, overload
 
-from my_types.axis import Axis
+from my_types import Axis
 
 
 def create_random_directions(axes: Axis) -> "Iterable[Literal[-1] | Literal[1]]":

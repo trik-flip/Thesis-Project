@@ -1,10 +1,8 @@
 import itertools
 from enum import Enum, auto
 from functools import singledispatch
-from typing import Iterable, TypeVar, cast, Union, Tuple
-
-from pipe import chain, dedup, groupby, select, traverse, where, sort, take
-
+from typing import Iterable, TypeVar, Tuple
+from pipe import where, sort, take
 from ..model.configuration_state import ConfigurationState
 from ..model.edge import Edge
 from ..model.face import Face
@@ -12,7 +10,7 @@ from ..model.facet import Facet
 from ..model.vertex import Vertex
 
 
-pc = Union[Tuple[Face, Vertex], Tuple[Vertex, Face], Tuple[Edge, Edge]]
+# pc = Union[Tuple[Face, Vertex], Tuple[Vertex, Face], Tuple[Edge, Edge]]
 R_6 = None
 
 
@@ -23,62 +21,19 @@ class PrimitiveContactsType(Enum):
 
 
 @singledispatch
-def enumerate_primitive_contact(moving: Iterable, stationary: Iterable):
-    if all((isinstance(v, Vertex) for v in moving)) and all(
-        (isinstance(f, Face) for f in stationary)
-    ):
-        moving = cast(Iterable[Vertex], moving)
-        stationary = cast(Iterable[Face], stationary)
-        return _enumerate_vertex_plane_primitive_contacts(moving, stationary)
-    elif all((isinstance(f, Face) for f in moving)) and all(
-        (isinstance(v, Vertex) for v in stationary)
-    ):
-        moving = cast(Iterable[Face], moving)
-        stationary = cast(Iterable[Vertex], stationary)
-        return _enumerate_plane_vertex_primitive_contacts(moving, stationary)
-    elif all((isinstance(e, Edge) for e in moving)) and all(
-        (isinstance(e, Edge) for e in stationary)
-    ):
-        moving = cast(Iterable[Edge], moving)
-        stationary = cast(Iterable[Edge], stationary)
-        return _enumerate_line_line_primitive_contacts(moving, stationary)
-    else:
-        raise Exception("This code is unreachable")
-
+def enumerate_primitive_contact(moving: Iterable, stationary: Iterable) -> list:
+    raise Exception("This code is unreachable")
 
 @enumerate_primitive_contact.register
-def enumerate_primitive_contact(moving: Iterable[Vertex],
-                                stationary: Iterable[Face]):
-    """enumerate over Vertex on Face contacs
-    where the Vertex contacts are able to move"""
-    ...
-
-
-@enumerate_primitive_contact.register
-def enumerate_primitive_contact(moving: Iterable[Face],
-                                stationary: Iterable[Vertex]):
-    """enumerate over Face on Vertex contacs
-    where the Face contacts are able to move"""
-    ...
-
-
-@enumerate_primitive_contact.register
-def enumerate_primitive_contact(moving: Iterable[Edge],
-                                stationary: Iterable[Edge]):
-    """enumerate over Edge on Edge contacs
-    where the Edge contacts are able to move"""
-    ...
-
-
 def _enumerate_vertex_plane_primitive_contacts(
-    moving_part_vertices: Iterable[Vertex],
-    stationary_part_faces: Iterable[Face],
+    moving: Iterable[Vertex],
+    stationary: Iterable[Face],
 ):
     "Page 46, Figure 13"
     primitive_contacts = []
     bound = []
-    pairs = itertools.product(moving_part_vertices,
-                              stationary_part_faces)
+    pairs = itertools.product(moving,
+                              stationary)
     for vertex, face in pairs | where(lambda v, f: v.lies_on(f)):
         primitive_contacts.append(c := (vertex, face))
         for edge in face.edges | where(lambda e: e.is_convex
@@ -89,16 +44,17 @@ def _enumerate_vertex_plane_primitive_contacts(
     return bound
 
 
+@enumerate_primitive_contact.register
 def _enumerate_plane_vertex_primitive_contacts(
-    moving_part_faces: Iterable[Face],
-    stationary_part_vertices: Iterable[Vertex],
+    moving: Iterable[Face],
+    stationary: Iterable[Vertex],
 ):
     "Page 47, Figure 14"
     primitive_contacts: list[tuple[Face, Vertex]] = []
     bound: list[tuple[Face, Vertex, tuple[Face, Vertex]]] = []
 
-    pairs = itertools.product(moving_part_faces,
-                              stationary_part_vertices)
+    pairs = itertools.product(moving,
+                              stationary)
     for face, vertex in pairs | where(lambda f, v: v.lies_on(f)):
         primitive_contacts.append(c := (face, vertex))
         for edge in face.edges | where(lambda e: e.is_convex
@@ -107,23 +63,23 @@ def _enumerate_plane_vertex_primitive_contacts(
             bound.append((g, vertex, c))
     return bound
 
-
+@enumerate_primitive_contact.register
 def _enumerate_line_line_primitive_contacts(
-    moving_part_edges: Iterable[Edge],
-    stationary_part_edges: Iterable[Edge],
-) -> "Iterable[tuple[Vertex, tuple[Edge,Edge]]]":
+    moving: Iterable[Edge],
+    stationary: Iterable[Edge],
+) -> "list[tuple[Vertex, tuple[Edge,Edge]]]":
     "Page 47, Figure 15"
     primitive_contacts: list[tuple[Edge, Edge]] = []
     bound: list[Vertex, Face, tuple[Edge, Edge]] = []
 
-    pairs = itertools.product(moving_part_edges,
-                              stationary_part_edges)
+    pairs = itertools.product(moving,
+                              stationary)
     for edge1, edge2 in pairs | where(lambda e1, e2: e1.intersects(e2)):
         primitive_contacts.append(c := (edge1, edge2))
         for vertex in edge1.vertices | where(lambda vertex: vertex.is_convex
                                              and vertex.lies_on(edge2)):
             f = list(
-                stationary_part_edges
+                stationary
                 | where(lambda x: x.is_adjacent_to(edge2))
                 | sort(lambda x: x.normal.
                        perpendicularity_with_respect_to(edge1))
@@ -135,7 +91,7 @@ def _enumerate_line_line_primitive_contacts(
         for vertex in edge2.vertices | where(lambda vertex: vertex.is_convex
                                              and vertex.lies_on(edge1)):
             f = list(
-                stationary_part_edges
+                stationary
                 | where(lambda x: x.is_adjacent_to(edge1))
                 | sort(lambda x: x.normal.
                        perpendicularity_with_respect_to(edge2))
@@ -180,14 +136,11 @@ def enumerate_primitive_contacts(
 ) -> "Iterable[tuple[Face, Vertex] | tuple[Vertex, Face] | tuple[Edge, Edge]]":
     """Page 39, figure 7"""
     pcs: set[pc] = set()
-    for v, f in itertools.product(moving_v, stationary_f)
-    | where(lambda v, f: v.lies_on(f.surface)):
+    for v, f in itertools.product(moving_v, stationary_f) | where(lambda v, f: v.lies_on(f.surface)):
         pcs.add((v, f))
-    for f, v in itertools.product(moving_f, stationary_v)
-    | where(lambda f, v: v.lies_on(f.surface)):
+    for f, v in itertools.product(moving_f, stationary_v) | where(lambda f, v: v.lies_on(f.surface)):
         pcs.add((f, v))
-    for edge1, edge2 in itertools.product(moving_e, stationary_e)
-    | where(lambda edge1, edge2: edge1.intersects(edge2)):
+    for edge1, edge2 in itertools.product(moving_e, stationary_e) | where(lambda edge1, edge2: edge1.intersects(edge2)):
         pcs.add((edge1, edge2))
     return pcs
 

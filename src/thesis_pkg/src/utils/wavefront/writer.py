@@ -7,7 +7,7 @@ __all__ = ["write_obj_file", "write_multi_part_obj_file"]
 def write_obj_file(
     points: "Iterable[tuple[float,float,float]]", file_name: str = "tmp.obj"
 ) -> None:
-    """Write an object consisting of points to a `obj` file"""
+    """Write an object consisting of points to a `obj` file in wavefront format"""
     assert ".obj" in file_name, f"Needs to be an `obj` file, got {file_name}"
     with open(file_name, "w") as f:
         f.write("o obj_0\n\n")
@@ -22,7 +22,7 @@ def write_multi_part_obj_file(
     folder_name: str = "multi_tmp",
 ) -> None:
     """
-    Write an object composed from multiple convex objects
+    Write an object composed from multiple convex objects in wavefront format in a `obj` file.
     """
     assert not os.path.exists(folder_name), "Folder already exists"
     assert "{i}" in file_name, f"Need an indexer, got `{file_name}`"

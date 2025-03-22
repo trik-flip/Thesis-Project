@@ -17,6 +17,7 @@ from .call_back import callback, key_callback
 from .files import PATH_MODEL_CUBE
 from .util import copy_model, create_model_iiwa
 
+
 __all__ = [
     "simulators",
 ]
@@ -270,6 +271,9 @@ def sim2() -> None:
     mujoco.mjr_freeContext(con)
 
 
+from .communication import Modes, translate_forces
+
+
 @simulator_register("run")
 def sim(
     ros_namespace: str = "digital_twin",
@@ -297,6 +301,10 @@ def sim(
             7: data.ctrl[6],
         },
     }
+    import rospy
+
+    from thesis_pkg.msg import JointPosition
+
     with mujoco.viewer.launch_passive(
         model,
         data,
@@ -304,14 +312,11 @@ def sim(
     ) as viewer:
         print("creating viewers")
         viewers: list[tuple[mujoco.MjModel, mujoco.MjData, mujoco.viewer.Handle]] = []
-        print("init ros")
-        # rospy.init_node("mujoco_listener", anonymous=True)
-        print("init sub")
-        _, data = create_model_iiwa()
+        rospy.init_node("mujoco_listener", anonymous=True)
+        # _, data = create_model_iiwa()
         call_back = partial(callback, data)
-        # rospy.Subscriber(f"{ros_namespace}/joints", JointPosition, call_back)
-        print("init pub")
-        # pub = rospy.Publisher(f"{ros_namespace}/forces", JointPosition, queue_size=10)
+        rospy.Subscriber(f"{ros_namespace}/joints", JointPosition, call_back)
+        pub = rospy.Publisher(f"{ros_namespace}/forces", JointPosition, queue_size=10)
         print(f"{dir(model)}")
         while viewer.is_running():
             step_start = data.time
@@ -319,7 +324,7 @@ def sim(
             mujoco.mj_step(model, data)
             # * Step 3.a: Retrieve data from simulation, this is implied since we're able to get data from the simulator every timestep
             # * Step 4.a: Pass on reconstructed high-level info
-            # pub.publish(translate_forces(data.actuator_force, Modes.R2S))
+            pub.publish(translate_forces(data.actuator_force, Modes.R2S))
             # jp.position.a1 = m.sensordata[0]
             # * Step 5.a: Pass on current search-space possibilities
 
@@ -351,7 +356,6 @@ def sim(
             if state["close"]:
                 viewer.close()
             if state["acc"][0]:
-
                 follow_state_update(data, state)
             # Pick up changes to the physics state, apply perturbations, update options from GUI.
 
